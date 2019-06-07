@@ -257,6 +257,7 @@ The available fields are as follows
 |dstIP|only IPv4|
 |srcIP6|only IPv6|
 |dstIP6|only IPv6|
+|IPFragmentOffset|only IPv4|
 |IPProtocol||
 |IPTOS|only IPv4|
 |IPTTL||
