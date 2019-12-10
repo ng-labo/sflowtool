@@ -41,6 +41,8 @@ extern "C" {
 #include "sflow.h" /* sFlow v5 */
 #include "sflow_v2v4.h" /* sFlow v2/4 */
 
+#include "libpcapreader.h"
+
 /* If the platform is Linux, enable the source-spoofing feature too. */
 #ifdef linux
 #define SPOOFSOURCE 1
@@ -1735,7 +1737,7 @@ static void decodeIPV6(SFSample *sample)
 
 static void readPcapHeader() {
   struct pcap_file_header hdr;
-  if(fread(&hdr, sizeof(hdr), 1, sfConfig.readPcapFile) != 1) {
+  if(pcap_read(&hdr, sizeof(hdr), 1, sfConfig.readPcapFile) != 1) {
     fprintf(ERROUT, "unable to read pcap header from %s : %s\n", sfConfig.readPcapFileName, strerror(errno));
     exit(-30);
   }
@@ -5452,8 +5454,8 @@ static int readPcapPacket(FILE *file)
   SFSample sample;
   int skipBytes = 0;
 
-  if(fread(&hdr, sizeof(hdr), 1, file) != 1) {
-    if(feof(file)) return 0;
+  if(pcap_read(&hdr, sizeof(hdr), 1, file) != 1) {
+    if(pcap_feof(file)) return 0;
     fprintf(ERROUT, "unable to read pcap packet header from %s : %s\n", sfConfig.readPcapFileName, strerror(errno));
     exit(-32);
   }
@@ -5472,7 +5474,7 @@ static int readPcapPacket(FILE *file)
     return 0;
   }
 
-  if(fread(buf, hdr.caplen, 1, file) != 1) {
+  if(pcap_read(buf, hdr.caplen, 1, file) != 1) {
     fprintf(ERROUT, "unable to read pcap packet from %s : %s\n", sfConfig.readPcapFileName, strerror(errno));
     exit(-34);
   }
@@ -5994,8 +5996,7 @@ int main(int argc, char *argv[])
 
   /* reading from file or socket? */
   if(sfConfig.readPcapFileName) {
-    if(strcmp(sfConfig.readPcapFileName, "-") == 0) sfConfig.readPcapFile = stdin;
-    else sfConfig.readPcapFile = fopen(sfConfig.readPcapFileName, "rb");
+    sfConfig.readPcapFile = pcap_open(sfConfig.readPcapFileName, "rb");
     if(sfConfig.readPcapFile == NULL) {
       fprintf(ERROUT, "cannot open %s : %s\n", sfConfig.readPcapFileName, strerror(errno));
       exit(-1);

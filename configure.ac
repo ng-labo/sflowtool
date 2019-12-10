@@ -18,10 +18,11 @@ case "$host" in
 	LDFLAGS="$LDFLAGS -lsocket -lnsl" 
 	;;
 esac
+LIBS="-lbz2 -lpthread"
 
 # Checks for header files.
 AC_HEADER_STDC
-AC_CHECK_HEADERS([fcntl.h netdb.h netinet/in.h stdlib.h string.h sys/socket.h sys/time.h unistd.h])
+AC_CHECK_HEADERS([fcntl.h netdb.h netinet/in.h stdlib.h string.h sys/socket.h sys/time.h unistd.h pthread.h bzlib.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST
@@ -31,7 +32,7 @@ AC_HEADER_TIME
 AC_FUNC_SELECT_ARGTYPES
 AC_FUNC_STRFTIME
 AC_FUNC_VPRINTF
-AC_CHECK_FUNCS([getaddrinfo memset select socket strdup strerror strspn strtol])
+AC_CHECK_FUNCS([getaddrinfo memset select socket strdup strerror strspn strtol create_pthread ])
 
 AC_CONFIG_FILES([Makefile
                  src/Makefile])
