@@ -948,9 +948,11 @@ static void json_indent() {
 }
 
 static void json_start(char *fname, char bracket) {
-  if(sfConfig.jsonStart == NO) {
-    if(sfConfig.jsonListStart == NO)
-      putchar(',');
+  if(sfConfig.jsonStart) {
+    sfConfig.jsonStart = NO;
+  }
+  else if(sfConfig.jsonListStart == NO) {
+    putchar(',');
     json_indent();
   }
   if(fname)
@@ -1324,6 +1326,7 @@ static void decodeLinkLayer(SFSample *sample)
   uint8_t *end = start + sample->s.headerLen;
   uint8_t *ptr = start;
   uint16_t type_len;
+  uint32_t vlanDepth=0;
   SFStr buf;
 
   /* assume not found */
@@ -1341,7 +1344,11 @@ static void decodeLinkLayer(SFSample *sample)
   type_len = (ptr[0] << 8) + ptr[1];
   ptr += 2;
 
-  if(type_len == 0x8100) {
+  while(type_len == 0x8100
+	|| type_len == 0x88A8
+	|| type_len == 0x9100
+	|| type_len == 0x9200
+	|| type_len == 0x9300) {
     if((end - ptr) < 4) return; /* not enough for an 802.1Q header */
     /* VLAN  - next two bytes */
     uint32_t vlanData = (ptr[0] << 8) + ptr[1];
@@ -1352,12 +1359,23 @@ static void decodeLinkLayer(SFSample *sample)
     /* |   pri  | c |         vlan-id        | */
     /*  ------------------------------------- */
     /* [priority = 3bits] [Canonical Format Flag = 1bit] [vlan-id = 12 bits] */
-    sf_logf_U32(sample, "decodedVLAN", vlan);
-    sf_logf_U32(sample, "decodedPriority", priority);
+    if(vlanDepth == 0) {
+      sf_logf_U32(sample, "decodedVLAN", vlan);
+      sf_logf_U32(sample, "decodedPriority", priority);
+    }
+    else {
+      /* 802.1AD / Q-in-Q: indicate VLAN depth */
+      char dotQField[64];
+      sprintf(dotQField, "decodedVLAN.%u", vlanDepth);
+      sf_logf_U32(sample, dotQField, vlan);
+      sprintf(dotQField, "decodedPriority.%u", vlanDepth);
+      sf_logf_U32(sample, dotQField, priority);
+    }
     sample->s.in_vlan = vlan;
     /* now get the type_len again (next two bytes) */
     type_len = (ptr[0] << 8) + ptr[1];
     ptr += 2;
+    vlanDepth++;
   }
 
   /* now we're just looking for IP */
@@ -1708,12 +1726,11 @@ static void decodeIPV6(SFSample *sample)
 	  /* nextHeader == 50 => encryption - don't bother coz we'll not be able to read any further */
 	  nextHeader == 51 || /* auth */
 	  nextHeader == 60) { /* destination options */
-      uint32_t optionLen, skip;
+      uint32_t optionLen;
       sf_logf_U32(sample, "IP6HeaderExtension", nextHeader);
       nextHeader = ptr[0];
       optionLen = 8 * (ptr[1] + 1);  /* second byte gives option len in 8-byte chunks, not counting first 8 */
-      skip = optionLen - 2;
-      ptr += skip;
+      ptr += optionLen;
       if(ptr > end) return; /* ran off the end of the header */
     }
 
@@ -2075,7 +2092,7 @@ static void sendNetFlowV5Datagram(SFSample *sample)
   else {
     /* set the sampling_interval header field too (used to be a 16-bit reserved field) */
     uint16_t samp_ival = (uint16_t)sample->s.meanSkipCount;
-    pkt.hdr.sampling_interval = htons(samp_ival & 0x4000);
+    pkt.hdr.sampling_interval = htons(samp_ival | 0x4000);
     pkt.flow.frames = htonl(1);
     pkt.flow.bytes = htonl(bytes);
   }
@@ -2170,8 +2187,7 @@ static void sendNetFlowV9Datagram(SFSample *sample)
   }
   else {
     /* set the sampling_interval header field */
-    uint16_t samp_ival = (uint16_t)sample->s.meanSkipCount;
-    pkt.data.flow.samplingInterval = htonl(samp_ival & 0x4000);
+    pkt.data.flow.samplingInterval = htonl(sample->s.meanSkipCount);
     pkt.data.flow.packets = htonl(1);
     pkt.data.flow.bytes = htonl(bytes);
   }
@@ -5355,9 +5371,12 @@ static int pcapOffsetToSFlow(uint8_t *start, int len)
     ptr += 2;
     break;
   }
-
+ 
   while(type_len == 0x8100
-	|| type_len == 0x9100) {
+	|| type_len == 0x88A8
+	|| type_len == 0x9100
+	|| type_len == 0x9200
+	|| type_len == 0x9300) {
     /* VLAN  - next two bytes */
     /*  _____________________________________ */
     /* |   pri  | c |         vlan-id        | */
