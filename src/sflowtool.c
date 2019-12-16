@@ -263,6 +263,11 @@ typedef struct _SFConfig {
   /* general options */
   int keepGoing;
   int allowDNS;
+
+  /* libfilter.h */
+  char *cond_agent_arg;
+  /* libifindexlookup.h*/
+  char lookupFile[256+1];
 } SFConfig;
 
 /* make the options structure global to the program */
@@ -411,6 +416,9 @@ typedef struct _SFSample {
     /* counter blocks */
     uint32_t statsSamplingInterval;
     uint32_t counterBlockVersion;
+
+    /* librepayload.h */
+    char payloadHex[256+1];
   } s;
 
   /* exception handler context */
@@ -431,6 +439,12 @@ typedef struct _SFSample {
 #define SF_ABORT_LENGTH_ERROR 3
 
 } SFSample;
+
+/* */
+#include "libifindexlookup.h"
+#include "librepayload.h"
+#include "libfilter.h"
+/* */
 
 /* Cisco netflow version 5 record format */
 
@@ -867,6 +881,30 @@ static int SFStr_copy(SFStr *sb, char *to, int capacity) {
   return bytes;
 }
 
+/* */
+static int SFStr_append_agentname(SFStr *sb, SFLAddress *address) {
+  if(lookup_isenable()){
+    char buf[20];
+    buf[0] = '\0';
+    lookup_agent(MyByteSwap32(address->address.ip_v4.addr), buf);
+    return SFStr_append(sb, buf);
+  }
+  else
+    return SFStr_append_ip(sb, (uint8_t *)&address->address.ip_v4.addr);
+}
+static int SFStr_append_ifalias(SFStr *sb ,SFLAddress *address ,uint32_t port) {
+  if(lookup_isenable()){
+    char buf[64];
+    //buf[0] = '\0';
+    snprintf(buf, 64, "(%u)", port);
+    lookup_ifalias(MyByteSwap32(address->address.ip_v4.addr), port, buf);
+    return SFStr_append(sb, buf);
+  }
+  else
+    return SFStr_append_U32(sb, "%u", port);
+}
+/* */
+
 /*_________________---------------------------__________________
   _________________     print functions       __________________
   -----------------___________________________------------------
@@ -932,6 +970,20 @@ static char *printInOutPort(uint32_t port, uint32_t format, SFStr *sb) {
   return SFStr_str(sb);
 }
 
+/* */
+static char *printAgentName(SFLAddress *address, SFStr *sb) {
+  SFStr_init(sb);
+  SFStr_append_agentname(sb, address);
+  return SFStr_str(sb);
+}
+
+static char *printIfalias(SFLAddress *address, uint32_t port, SFStr *sb) {
+  SFStr_init(sb);
+  SFStr_append_ifalias(sb, address, port);
+  return SFStr_str(sb);
+}
+/* */
+
 /*_________________---------------------------__________________
   _________________      JSON utils           __________________
   -----------------___________________________------------------
@@ -984,7 +1036,7 @@ static void sf_log_context(SFSample *sample) {
   time_t now = sample->pcapTimestamp ?: sample->readTimestamp;
   printf("%s %s %u %u %u:%u %s %s ",
 	 printTimestamp(now, &nowstr),
-	 printAddress(&sample->agent_addr, &agentIP),
+	 printAgentName(&sample->agent_addr, &agentIP),
 	 sample->agentSubId,
 	 sample->sequenceNo,
 	 sample->s.ds_class,
@@ -1145,12 +1197,12 @@ int sampleFilterOK(SFSample *sample)
 
 static void writeFlowLine(SFSample *sample)
 {
-  SFStr agentIP, srcMAC, dstMAC, srcIP, dstIP;
+  SFStr agentIP, srcMAC, dstMAC, srcIP, dstIP, inPortBuf, outPortBuf;
   /* source */
-  if(printf("FLOW,%s,%d,%d,",
-	    printAddress(&sample->agent_addr, &agentIP),
-	    sample->s.inputPort,
-	    sample->s.outputPort) < 0) {
+  if(printf("FLOW,%s,%s,%s,",
+            printAgentName(&sample->agent_addr, &agentIP),
+            printIfalias(&sample->agent_addr,sample->s.inputPort, &inPortBuf),
+            printIfalias(&sample->agent_addr,sample->s.outputPort, &outPortBuf)) < 0) {
     exit(-41);
   }
   /* layer 2 */
@@ -1193,6 +1245,15 @@ static void writeLineCustom(SFSample *sample)
   /* don't print anything if we didn't match any sample-level fields */
   if(sfConfig.outputFieldList.sampleFields == 0)
     return;
+
+  /* libfilter */
+  if(ismatch_conditions(sample)){
+    return;
+  }
+  /* librepayload */
+  if(inspect_pattern(sample->s.payloadHex)==0){
+    return;
+  }
 
   for(int ii = 0; ii < sfConfig.outputFieldList.n; ii++) {
     if(ii>0)
@@ -1604,6 +1665,50 @@ static void decodeIPLayer4(SFSample *sample, uint8_t *ptr) {
   }
 }
 
+/* decodePayload */
+static inline uint8_t bin2hex(int n) { return (n < 10) ? ('0' + n) : ('A' - 10 + n); }
+static void decodePayload(SFSample *sample) {
+  if (sample->s.ip_fragmentOffset == 0) {
+    switch(sample->s.dcd_ipProtocol) {
+    case 1: /* ICMP */
+    case 6: /* TCP */
+    case 17: /* UDP */
+      break;
+    default:
+      return;
+    }
+  } else {
+    // Fragmented packet
+    sample->s.offsetToPayload = 34;
+    sample->s.dcd_dport = 0;
+    sample->s.dcd_sport = 0;
+    sample->s.dcd_tcpFlags = 0;
+  }
+
+  char payloadAsc[128+1];
+
+  uint8_t *ptr = sample->s.header + sample->s.offsetToPayload;
+
+  int hex_index = 0;
+  int ptr_index = 0;
+  const int payload_length = sample->s.headerLen - sample->s.offsetToPayload;
+  for(; ptr_index < payload_length && ptr_index<128; ptr_index++, ptr++){
+    sample->s.payloadHex[hex_index++] = bin2hex(*ptr >> 4);
+    sample->s.payloadHex[hex_index++] = bin2hex(*ptr & 0x0f);
+    payloadAsc[ptr_index] = (*ptr>31 && *ptr<127) ? *ptr : '.';
+  }
+  if(ptr_index>0){
+    sample->s.payloadHex[hex_index] = '\0';
+    payloadAsc[ptr_index] = '\0';
+
+    SFStr payload;
+    SFStr_init(&payload);
+    SFStr_append(&payload, payloadAsc);
+    sf_logf(sample, NULL, "payload", SFStr_str(&payload));
+    sf_logf_U32(sample, "payloadlen", payload_length);
+  }
+}
+
 /*_________________---------------------------__________________
   _________________     decodeIPV4            __________________
   -----------------___________________________------------------
@@ -1650,6 +1755,7 @@ static void decodeIPV4(SFSample *sample)
       if((end - ptr) < headerBytes) return;
       ptr += headerBytes;
       decodeIPLayer4(sample, ptr);
+      decodePayload(sample);
     }
   }
 }
@@ -1737,6 +1843,7 @@ static void decodeIPV6(SFSample *sample)
     sample->s.dcd_ipProtocol = nextHeader;
     sf_logf_U32(sample, "IPProtocol", sample->s.dcd_ipProtocol);
     decodeIPLayer4(sample, ptr);
+    decodePayload(sample);
   }
 }
 
@@ -3592,8 +3699,8 @@ static void readFlowSample(SFSample *sample, int expanded)
     sample->s.outputPort = outp & 0x3fffffff;
   }
 
-  sf_logf(sample, NULL, "inputPort", printInOutPort(sample->s.inputPort, sample->s.inputPortFormat, &buf));
-  sf_logf(sample, NULL, "outputPort", printInOutPort(sample->s.outputPort, sample->s.outputPortFormat, &buf));
+  sf_logf(sample, NULL, "inputPort", printIfalias(&sample->agent_addr, sample->s.inputPort, &buf));
+  sf_logf(sample, NULL, "outputPort", printIfalias(&sample->agent_addr, sample->s.outputPort, &buf));
 
   /* clear the CLF record */
   sfCLF.valid = NO;
@@ -5054,7 +5161,7 @@ static void readSFlowDatagram(SFSample *sample)
   sample->sequenceNo = getData32(sample);  /* this is the packet sequence number */
   sample->sysUpTime = getData32(sample);
   samplesInPacket = getData32(sample);
-  sf_logf(sample, NULL, "agent", printAddress(&sample->agent_addr, &buf));
+  sf_logf(sample, NULL, "agent", printAgentName(&sample->agent_addr, &buf));
   sf_logf_U32(sample, "packetSequenceNo", sample->sequenceNo);
   sf_logf_U32(sample, "sysUpTime", sample->sysUpTime);
   sf_logf_U32(sample, "samplesInPacket", samplesInPacket);
@@ -5830,6 +5937,20 @@ static void instructions(char *command)
   fprintf(ERROUT, "   -6                 -  listen on IPv6 socket only\n");
   fprintf(ERROUT, "   +4                 -  listen on both IPv4 and IPv6 sockets\n");
   fprintf(ERROUT, "\n");
+
+  fprintf(ERROUT,"/*\n");
+  fprintf(ERROUT,"Experimental\n");
+  fprintf(ERROUT,"lookup ifalias/agent:\n");
+  fprintf(ERROUT, "   -K <filename>      -  search in current or ~/.sflowtool\n");
+  fprintf(ERROUT,"matching condition for -L:\n");
+  fprintf(ERROUT, "   -T network address -  either IPv4 or IPv6 okay\n");
+  fprintf(ERROUT, "      or ip protocol\n");
+  fprintf(ERROUT, "      ex. -T 1.2.3.0/24,6 -T 2001::/16\n");
+  fprintf(ERROUT, "   -U agent/inport,.. -  agent id or name\n");
+  fprintf(ERROUT, "                      -  ifindex or discription\n");
+  fprintf(ERROUT, "                      name or discription resolved by -K\n");
+  fprintf(ERROUT,"*/\n");
+
   fprintf(ERROUT, "=============== Advanced Tools ===========================================\n");
   fprintf(ERROUT, "| sFlow-RT (real time)  - https://sflow-rt.com                           |\n");
   fprintf(ERROUT, "| sFlowTrend (FREE)     - https://inmon.com/products/sFlowTrend.php      |\n");
@@ -5888,6 +6009,10 @@ static void process_command_line(int argc, char *argv[])
     case '?':
     case 'h':
       break;
+    case 'R': // librepayload.h
+    case 'T': // libfilter.h, just effective for -L
+    case 'U': // libfilter.h, just effective for -L
+    case 'K': // libifindexlookup.h, just effective for -L
     case 'L':
     case 'p':
     case 'r':
@@ -5950,6 +6075,29 @@ static void process_command_line(int argc, char *argv[])
       if(addForwardingTarget(argv[arg++]) == NO) exit(-35);
       sfConfig.outputFormat = SFLFMT_FWD;
       break;
+    case 'T': // libfilter
+      {
+          const char *v = argv[arg++];
+          if(parse_cond_ip(v)!=0){
+              fprintf(ERROUT, "invalid argument [%s] or over times for -T\n", v);
+              exit(-1);
+          }
+      }
+      break;
+    case 'U': // libfilter
+      {
+          sfConfig.cond_agent_arg = argv[arg++];
+      }
+      break;
+    case 'K': // libindexlookup
+      strncpy(sfConfig.lookupFile, argv[arg++], 256);
+      break;
+    case 'R': // libpayload
+      {
+      const char *ptn[] = { argv[arg++], NULL };
+      init_regex_t(1, ptn);
+      }
+      break;
     case 'v':
       if(plus) {
 	/* +v => include vlans */
@@ -6005,6 +6153,20 @@ int main(int argc, char *argv[])
 
   /* read the command line */
   process_command_line(argc, argv);
+
+  /* */
+  if(strlen(sfConfig.lookupFile)==0){
+    strcpy(sfConfig.lookupFile,"agent_ifindex.txt");
+  }
+  if(strlen(sfConfig.lookupFile)){
+    load_ifindexlookup(sfConfig.lookupFile);
+  }
+  if(sfConfig.cond_agent_arg){
+    if(parse_cond_agent(sfConfig.cond_agent_arg)==0){
+      return 1;
+    }
+  }
+  /* */
 
 #ifdef _WIN32
   /* on windows we need to tell stdout if we want it to be binary */
