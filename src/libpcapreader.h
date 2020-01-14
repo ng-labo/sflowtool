@@ -51,6 +51,12 @@ static inline void waiting(volatile int *ptr, const int status) {
     }
 }
 
+static inline void waiting2(volatile int *ptr, const int status1, const int status2) {
+    if(*ptr != status1 && *ptr != status2) while(*ptr != status1 && *ptr != status2) {
+        pthread_yield();
+    }
+}
+
 static int pcap_bz2_read_and_rotate(const int loading_bufindex) {
     int libbzerr;
     pcap_buffer.length[loading_bufindex] = BZ2_bzRead(&libbzerr, pcap_bzfile, pcap_buffer.data[loading_bufindex], PCAP_BUFFER_LENGTH);
@@ -165,6 +171,9 @@ int pcap_read(void *ptr, size_t size, int nmemb, void *stream) {
     curptr = (curptr==0) ? pcap_buffer.data[0] : curptr;
     int ret = 0;
     while(size>0){
+        // wait for LOADED at reading_bufindex on pcap_buffer[n].status
+	// it will be possible to get CLOSED
+        waiting2(&pcap_buffer.status[reading_bufindex], PCAP_BUFSTAT_LOADED, PCAP_BUFSTAT_CLOSED);
         if(pcap_buffer.status[reading_bufindex]==PCAP_BUFSTAT_CLOSED){
             pcap_finished = 1;
             // XXX
@@ -172,8 +181,6 @@ int pcap_read(void *ptr, size_t size, int nmemb, void *stream) {
             release_buffers();
             break;
         }
-        // wait for LOADED at reading_bufindex on pcap_buffer[n].status
-        waiting(&pcap_buffer.status[reading_bufindex], PCAP_BUFSTAT_LOADED);
 
         size_t dlen = pcap_buffer.length[reading_bufindex] - (curptr - pcap_buffer.data[reading_bufindex]);
         if(dlen==0){
