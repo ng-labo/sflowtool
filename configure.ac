@@ -33,6 +33,14 @@ AC_FUNC_STRFTIME
 AC_FUNC_VPRINTF
 AC_CHECK_FUNCS([getaddrinfo memset select socket strdup strerror strspn strtol])
 
+AC_CHECK_HEADER(hiredis/hiredis.h, [HIREDIS_CFLAGS="-I/usr/include/hiredis"
+                                    HIREDIS_LIBS="-L$libdir -lhiredis"], [hiredis=no])
+AC_SUBST([HIREDIS_CFLAGS])
+AC_SUBST([HIREDIS_LIBS])
+
+LIBS="$LIBS $HIREDIS_LIBS"
+CFLAGS="$CFLAGS $HIREDIS_CFLAGS"
+
 AC_CONFIG_FILES([Makefile
                  src/Makefile])
 AC_OUTPUT

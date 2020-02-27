@@ -41,6 +41,8 @@ extern "C" {
 #include "sflow.h" /* sFlow v5 */
 #include "sflow_v2v4.h" /* sFlow v2/4 */
 
+#include "libredis.h"
+
 /* If the platform is Linux, enable the source-spoofing feature too. */
 #ifdef linux
 #define SPOOFSOURCE 1
@@ -1194,15 +1196,30 @@ static void writeLineCustom(SFSample *sample)
   if(sfConfig.outputFieldList.sampleFields == 0)
     return;
 
+  const size_t maxLB = 1024;
+  char lineBuffer[maxLB];
+  char wordBuffer[maxLB];
+  size_t printed = 0;
+  lineBuffer[0] = 0;
   for(int ii = 0; ii < sfConfig.outputFieldList.n; ii++) {
-    if(ii>0)
-      printf(",");
+    if(ii>0){
+      printed += 1;
+      if(maxLB<printed)break;
+      strncat(lineBuffer, ",", maxLB - printed);
+    }
     char *field = sfConfig.outputFieldList.fields[ii];
     SFStr *val = &sfConfig.outputFieldList.values[ii];
-    if(val->len)
-      printf("%s", SFStr_str(val));
+    if(val->len){
+      printed += snprintf(wordBuffer, maxLB, "%s", SFStr_str(val));
+      if(maxLB<printed)break;
+      strncat(lineBuffer, wordBuffer, maxLB - printed);
+    }
   }
-  printf("\n");
+  if(redisctx){
+    lpush_libhiredis(lineBuffer);
+  }else{
+    printf("%s\n", lineBuffer);
+  }
 }
 
 /*_________________---------------------------__________________
@@ -5887,6 +5904,7 @@ static void process_command_line(int argc, char *argv[])
     case 'k':
     case '?':
     case 'h':
+    case 'M':
       break;
     case 'L':
     case 'p':
@@ -5981,6 +5999,9 @@ static void process_command_line(int argc, char *argv[])
       break;
     case 'D':
       sfConfig.allowDNS = YES;
+      break;
+    case 'M':
+      if(init_libhiredis()) exit(1);
       break;
     /* remaining are -h or -? */
     default: instructions(*argv); exit(0);
