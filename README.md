@@ -9,11 +9,17 @@ sflowtool -K agent_ifalias.txt -L agent,inputPort,srcIP,dstIP,IPProtocol
 
 agent_ifalias.txt shall be arranged by agent-id, if-index, agent-name, ifalias in camma separating.
 
+`agent-name` string is less than 20 byte.
+
+`ifalias` string is less than 20 byte.
+
 ```
 2130706433 1 localhost lo
 2130706433 2 localhost ens3
 2130706433 1073741823 localhost ens3
 ```
+
+now just in readPacket, it is available for online update of agent_ifalias.txt. if agent_ifalias.txt would be update, information of look up table is being followed.
 
 ### matching ipaddress or ipprotocol filter for output
 

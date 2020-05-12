@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <pthread.h>
 
 struct lookup_ifalias {
     unsigned int ifind;
@@ -20,13 +23,16 @@ struct lookup_agent {
 };
 
 static struct lookup_agent* agents = NULL;
+static struct lookup_agent* standbytbl = NULL;
+static time_t lookup_agent_file_ts = 0; // last modified ts on looking_filepath
+static char looking_filepath[256];
 
 int lookup_isenable() {
     return (agents!=NULL);
 }
 
-int free_ifindexlookup() {
-    for(struct lookup_agent* rp = agents;rp!=NULL;){
+int free_ifindexlookup_impl(struct lookup_agent* tbl) {
+    for(struct lookup_agent* rp = tbl;rp!=NULL;){
         for(struct lookup_ifalias* ip = rp->first;ip!=NULL;){
             struct lookup_ifalias* p = ip;
             ip = ip->next;
@@ -39,18 +45,16 @@ int free_ifindexlookup() {
     return 0;
 }
 
-int load_ifindexlookup(const char *filename) {
-    char path[256];
-    strncpy(path, filename, 256);
-    if(access(path, R_OK)!=0){
-        snprintf(path, 256, "%s/.sflowtool/%s", getenv("HOME"), filename);
-        if(access(path, R_OK)!=0){
-            return 1;
-        }
+int free_ifindexlookupl() {
+    if(agents){
+        free_ifindexlookup_impl(agents);
+        agents = NULL;
     }
+}
 
-    agents = NULL;
-    FILE* fp = fopen(path, "r");
+int load_ifindexlookup_impl(struct lookup_agent** tbl) {
+    struct lookup_agent* ptr = NULL;
+    FILE* fp = fopen(looking_filepath, "r");
     if(fp==NULL){
         return 1;
     }
@@ -65,8 +69,7 @@ int load_ifindexlookup(const char *filename) {
         if(feof(fp))break;
         struct lookup_agent* agent_ptr = NULL;
         struct lookup_agent* prev_agent_ptr = NULL;
-
-        for(struct lookup_agent* rp = agents;rp!=NULL;rp = rp->next){
+        for(struct lookup_agent* rp = ptr;rp!=NULL;rp = rp->next){
             if(rp->id==id){
                 agent_ptr = rp;
                 break;
@@ -80,8 +83,8 @@ int load_ifindexlookup(const char *filename) {
             agent_ptr->id = id;
             agent_ptr->num_ifind = 0;
             strncpy(agent_ptr->name, r, 20);
-            if(agents==NULL){
-                agents = agent_ptr;
+            if(ptr==NULL){
+                ptr = agent_ptr;
             }
             if(prev_agent_ptr){
                 prev_agent_ptr->next = agent_ptr;
@@ -109,8 +112,74 @@ int load_ifindexlookup(const char *filename) {
 
     }
     fclose(fp);
-    fprintf(stderr, "load ifalias information from %s\n", path);
+    *tbl = ptr;
+
+    struct stat buf;
+    if(stat(looking_filepath, &buf)==0){
+        lookup_agent_file_ts = buf.st_mtim.tv_sec;
+    }
+
+    fprintf(stderr, "load ifalias information from %s\n", looking_filepath);
     return 0;
+}
+
+static int monitor_ifindexlookup_alive = 0;
+static pthread_t monitor_thread = 0;
+void* monitor_ifindexlookup_file(void *unused) {
+    fprintf(stderr, "start monitor_ifindexlookup_file()\n");
+    while(monitor_ifindexlookup_alive){
+        struct stat buf;
+        if(standbytbl==NULL && stat(looking_filepath, &buf)==0){
+            if(buf.st_mtim.tv_sec != lookup_agent_file_ts){
+                lookup_agent_file_ts = buf.st_mtim.tv_sec;
+                int r = load_ifindexlookup_impl(&standbytbl);
+                if(r!=0){
+                    standbytbl = NULL;
+                    fprintf(stderr, "failed load_ifindexlookup_impl()\n");
+                }else{
+                    fprintf(stderr, "success load_ifindexlookup_impl()\n");
+                }
+            }
+        }
+        sleep(10);
+    }
+}
+
+int start_monotor_ifindexlookup_file() {
+    pthread_create(&monitor_thread, NULL, monitor_ifindexlookup_file, NULL);
+}
+
+int load_ifindexlookup(const char *filename) {
+    char path[256];
+    strncpy(path, filename, 256);
+    if(access(path, R_OK)!=0){
+        snprintf(path, 256, "%s/.sflowtool/%s", getenv("HOME"), filename);
+        if(access(path, R_OK)!=0){
+            return 1;
+        }
+    }
+
+    strncpy(looking_filepath, path, 256);
+    int r = load_ifindexlookup_impl(&standbytbl);
+    if (r==0 && standbytbl){
+        agents = standbytbl;
+        standbytbl = NULL;
+        monitor_ifindexlookup_alive = 1;
+        start_monotor_ifindexlookup_file();
+        return 0;
+    }
+
+    return 1;
+}
+
+int update_ifindexlookup() {
+    if(standbytbl){
+        struct lookup_agent* old = agents;
+        agents = standbytbl;
+        standbytbl = NULL;
+        free_ifindexlookup_impl(old);
+        fprintf(stderr, "lookup table was changed.\n");
+    }
 }
 
 int lookup_agentifindex(const unsigned int agent, const unsigned int ifind, char *name, char *ifalias) {

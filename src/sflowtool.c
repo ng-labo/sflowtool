@@ -5429,6 +5429,9 @@ static void readPacket(int soc)
       sample.sourceIP.address.ip_v4 = v4src;
     }
   }
+  /* */
+  update_ifindexlookup();
+  /* */
   receiveSFlowDatagram(&sample);
 }
 
